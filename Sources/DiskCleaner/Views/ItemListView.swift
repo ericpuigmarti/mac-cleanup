@@ -13,6 +13,14 @@ struct ItemListView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
+            InfoCallout(
+                text: category.safetyExplanation,
+                icon: category.safetyLevel.icon,
+                tint: category.safetyLevel.color
+            )
+            .padding(.horizontal)
+            .padding(.bottom, 12)
+
             if store.scanning.contains(category) {
                 VStack(spacing: 10) {
                     Spacer()
@@ -59,13 +67,17 @@ struct ItemListView: View {
 
             SummaryBarView(store: store, category: category)
         }
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var header: some View {
         HStack(spacing: 12) {
             CategoryIconBadge(category: category, size: 34)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(category.rawValue).font(.title2).bold()
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(category.rawValue).font(.title2).bold()
+                    SafetyBadge(level: category.safetyLevel)
+                }
                 Text(category.subtitle).font(.subheadline).foregroundStyle(.secondary)
             }
             Spacer()

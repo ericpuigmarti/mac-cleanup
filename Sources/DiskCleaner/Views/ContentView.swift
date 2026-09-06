@@ -20,6 +20,7 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 780, minHeight: 520)
+        .trashErrorAlert(store: store)
         .onChange(of: store.selection) { _ in
             store.selectedItemIDs.removeAll()
         }

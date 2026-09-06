@@ -98,6 +98,59 @@ scanning/trashing on the real machine, not by reading the code:
   reliable way to check from the command line (Finder owns Trash and doesn't need FDA to
   report on it). Worth remembering for any future debugging session, not just this one.
 
+**Phase 5 — Safety education + "one-click, not a utility" simplification**
+
+The ask: teach people what's actually safe to trash, and make the common case not require
+understanding six categories first.
+
+- **Every category now commits to one of three honest tiers** (`SafetyLevel`): 🟢 Safe to
+  clean (Caches & Logs, Developer — regenerates automatically, zero data-loss risk), 🟡 Your
+  files (Downloads, Large Documents — your own files, just flagged by size/age), 🟠 Review
+  first (Unused Applications, Orphaned App Files — a real app removal or a heuristic guess).
+  Same badge, same color, same three labels everywhere — Overview's category rows and every
+  category's own page header.
+- **Every category page now opens with a plain-language "why" callout** (`InfoCallout`,
+  color-matched to its safety tier) explaining specifically why *this* category is safe or
+  isn't — not a generic disclaimer, a real answer (e.g. Caches: "nothing here is a document,
+  setting, or file you created"; Unused Apps: "you can always redownload or reinstall it
+  later"). Memory's existing "why no purge button" note was refactored to use the same
+  component for visual consistency.
+- **One-click "Clean Safe Items"** on Overview — the new primary action, ahead of "Scan Every
+  Category" (demoted to a secondary/bordered button). Auto-scans Caches & Logs + Developer if
+  they haven't been scanned yet, then shows one combined confirmation across both, one Trash
+  operation. This is the whole point: the common case no longer requires visiting six category
+  pages and understanding what each one means first.
+- **One-time dismissible "How to read this" banner** on first launch (`@AppStorage`-backed),
+  explaining the three-tier system once and then staying out of the way for good.
+- Refactored the trash-execution loop (`ScanStore.trash(_:)`) so `trashSelected()` and the new
+  `confirmCleanSafeItems()` share one implementation — same SafetyGuard re-check, same Full
+  Disk Access detection, no duplicated logic to drift out of sync.
+- The shared "couldn't move to Trash" / Full Disk Access alert moved from `SummaryBarView` up
+  to `ContentView` (`TrashErrorAlert` view modifier), since Clean Safe Items can now trigger it
+  from Overview, not just from a category page.
+- **Real bug caught mid-build, reproduced and confirmed fixed**: adding
+  `.fixedSize(horizontal: false, vertical: true)` to the new `InfoCallout`'s `Text` — a
+  normally-safe SwiftUI idiom — produced a degenerate layout specifically on `ItemListView`
+  (sidebar rows went blank, header content shifted to negative Y off-screen, footer pushed to
+  y≈1430 in a 600pt window) once combined with the page's `Spacer()`-based empty state and no
+  explicit height anchor on the root `VStack`. Fixed two ways: removed the unneeded `fixedSize`
+  (Memory's original explainer never needed it either), and added
+  `.frame(maxHeight: .infinity, alignment: .top)` to `ItemListView`'s root `VStack` so any
+  future page-level view is anchored against the real available height instead of inferring it
+  from children.
+- **Testing note, not an app bug**: mid-session, directory enumeration (`SizeCalculator`'s use
+  of `FileManager`'s `NSURLDirectoryEnumerator`) started blocking indefinitely inside the
+  kernel `open()` syscall on `~/Library/Caches` and, later, even `~/Downloads` — 0.0% CPU,
+  sustained, reproducible with the scanner code untouched. Confirmed via `sample` (blocked in
+  `open`, not a Swift-level deadlock) and, decisively, by running plain `du -sh ~/Library/Caches`
+  from Terminal at the same time — it hung too. Since a completely unrelated Unix command hung
+  identically, this is an environment/sandbox filesystem stall in the computer-use test session
+  used to build this, not a bug in the app (consistent with the menu-bar-icon gap already noted
+  below — this test environment has now shown two independent low-level quirks). **Re-verify
+  the full Clean Safe Items flow on Eric's actual Mac** before trusting it end-to-end; the parts
+  reachable before the stall (badges, callouts, confirmation copy, scan-then-confirm sequencing,
+  the layout fix itself) were all confirmed working by direct reproduction.
+
 ## How it's built
 
 - Swift Package Manager layout (`Package.swift`, `Sources/DiskCleaner/`), but **built via
@@ -122,6 +175,14 @@ scanning/trashing on the real machine, not by reading the code:
   genuinely has not been confirmed working anywhere. **Needs a real check on Eric's actual
   Mac** before relying on it; if it's also missing there, the menu bar feature needs its own
   debugging pass.
+- **"Clean Safe Items" end-to-end trash confirmation not fully verified live** — same test
+  environment, different quirk this time: mid-session directory enumeration started hanging
+  indefinitely (confirmed environment-wide via plain `du` hanging too, not an app bug — see
+  Phase 5). Everything up to and including the scan-then-confirm sequencing was verified
+  working by direct reproduction; the actual Trash operation for this specific one-click path
+  should get a real run on Eric's Mac before being trusted blind. `trashSelected()` (the
+  per-category path) IS fully verified live, including the Full Disk Access failure case, and
+  `confirmCleanSafeItems()` shares its exact trash-execution code.
 - **Full Disk Access required for one specific case**: trashing Orphaned App Files entries
   that live under `~/Library/Containers/*` (other apps' sandbox containers). Everything else
   works without it. The app now explains this and offers a direct link to the right System

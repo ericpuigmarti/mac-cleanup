@@ -17,6 +17,12 @@ final class ScanStore: ObservableObject {
     /// so every path to "trash the current selection" goes through one confirmation.
     @Published var showTrashConfirmation = false
 
+    /// One-click "Clean Safe Items": true while the safe categories are being
+    /// scanned on the way to showing the confirmation, so Overview can say
+    /// "Checking…" instead of the button just sitting there looking inert.
+    @Published var isPreparingSafeClean = false
+    @Published var showCleanSafeConfirmation = false
+
     @Published var memoryInfo: MemoryInfo?
     @Published var topProcesses: [ProcessMemoryInfo] = []
     @Published var isRefreshingMemory = false
@@ -31,6 +37,10 @@ final class ScanStore: ObservableObject {
 
     var totalReclaimable: Int64 {
         ScanCategory.allCases.reduce(0) { $0 + totalSize(for: $1) }
+    }
+
+    var totalSafeReclaimable: Int64 {
+        ScanCategory.safeCategories.reduce(0) { $0 + totalSize(for: $1) }
     }
 
     var hasScannedAnything: Bool {
@@ -58,6 +68,7 @@ final class ScanStore: ObservableObject {
             let items = await Self.runScan(category)
             self.results[category] = items
             self.scanning.remove(category)
+            self.checkSafeCleanReadiness()
         }
     }
 
@@ -65,6 +76,30 @@ final class ScanStore: ObservableObject {
         for category in ScanCategory.allCases {
             scan(category)
         }
+    }
+
+    /// The one-click "Clean Safe Items" entry point: scans the safe categories
+    /// first if needed (so it works from a completely fresh launch), then shows
+    /// one combined confirmation. This is deliberately the only action on
+    /// Overview that doesn't require visiting individual category pages first.
+    func startCleanSafeItems() {
+        let alreadyScanned = ScanCategory.safeCategories.allSatisfy { results[$0] != nil }
+        guard !alreadyScanned else {
+            showCleanSafeConfirmation = true
+            return
+        }
+        isPreparingSafeClean = true
+        for category in ScanCategory.safeCategories {
+            scan(category)
+        }
+    }
+
+    private func checkSafeCleanReadiness() {
+        guard isPreparingSafeClean else { return }
+        let allDone = ScanCategory.safeCategories.allSatisfy { results[$0] != nil && !scanning.contains($0) }
+        guard allDone else { return }
+        isPreparingSafeClean = false
+        showCleanSafeConfirmation = true
     }
 
     nonisolated private static func runScan(_ category: ScanCategory) async -> [ScanItem] {
@@ -105,33 +140,63 @@ final class ScanStore: ObservableObject {
     /// whatever check produced it during scanning.
     func trashSelected() {
         guard let category = selectedCategory else { return }
-        let itemsToTrash = selectedItems
-        var succeeded: [String] = []
-        var failures: [String] = []
+        let result = trash(selectedItems)
+        if !result.succeededIDs.isEmpty {
+            results[category] = (results[category] ?? []).filter { !result.succeededIDs.contains($0.id) }
+            selectedItemIDs.subtract(result.succeededIDs)
+        }
+        lastTrashNeedsFullDiskAccess = result.sawPermissionFailure
+        lastTrashError = result.failures.isEmpty ? nil : "Couldn't move to Trash: \(result.failures.joined(separator: ", "))"
+    }
+
+    /// Trashes every item currently found in every safe category, in one pass.
+    /// This is the whole point of "Clean Safe Items" — no per-item selection.
+    func confirmCleanSafeItems() {
+        var allSucceeded = Set<String>()
+        var allFailures: [String] = []
         var sawPermissionFailure = false
 
-        for item in itemsToTrash {
+        for category in ScanCategory.safeCategories {
+            let items = results[category] ?? []
+            let result = trash(items)
+            results[category] = items.filter { !result.succeededIDs.contains($0.id) }
+            allSucceeded.formUnion(result.succeededIDs)
+            allFailures.append(contentsOf: result.failures)
+            sawPermissionFailure = sawPermissionFailure || result.sawPermissionFailure
+        }
+
+        selectedItemIDs.subtract(allSucceeded)
+        lastTrashNeedsFullDiskAccess = sawPermissionFailure
+        lastTrashError = allFailures.isEmpty ? nil : "Couldn't move to Trash: \(allFailures.joined(separator: ", "))"
+    }
+
+    private struct TrashOutcome {
+        var succeededIDs: Set<String> = []
+        var failures: [String] = []
+        var sawPermissionFailure = false
+    }
+
+    /// Core trash loop shared by `trashSelected()` and `confirmCleanSafeItems()`.
+    /// Re-verifies each path against SafetyGuard immediately before acting,
+    /// independent of whatever check produced the item during scanning.
+    private func trash(_ items: [ScanItem]) -> TrashOutcome {
+        var outcome = TrashOutcome()
+        for item in items {
             guard SafetyGuard.isSafe(item.url) else {
-                failures.append(item.name)
+                outcome.failures.append(item.name)
                 continue
             }
             do {
                 try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
-                succeeded.append(item.id)
+                outcome.succeededIDs.insert(item.id)
             } catch {
-                failures.append(item.name)
+                outcome.failures.append(item.name)
                 if Self.isLikelyFullDiskAccessFailure(error) {
-                    sawPermissionFailure = true
+                    outcome.sawPermissionFailure = true
                 }
             }
         }
-
-        if !succeeded.isEmpty {
-            results[category] = (results[category] ?? []).filter { !succeeded.contains($0.id) }
-            selectedItemIDs.subtract(succeeded)
-        }
-        lastTrashNeedsFullDiskAccess = sawPermissionFailure
-        lastTrashError = failures.isEmpty ? nil : "Couldn't move to Trash: \(failures.joined(separator: ", "))"
+        return outcome
     }
 
     /// macOS blocks writes to some ~/Library subfolders (notably other apps'

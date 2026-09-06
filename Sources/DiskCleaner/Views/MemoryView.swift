@@ -13,7 +13,7 @@ struct MemoryView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     if let info = store.memoryInfo {
                         breakdown(info)
-                        explainer
+                        InfoCallout(text: "macOS manages memory automatically — free-looking RAM is reused instantly and isn't wasted, and \"purging\" memory doesn't speed anything up (it can make things slower by forcing reloads). The one thing that genuinely helps is closing apps that are actively holding a lot of it, below.")
                         topProcessesList
                     } else {
                         emptyState
@@ -129,18 +129,6 @@ struct MemoryView: View {
             Circle().fill(color).frame(width: 7, height: 7)
             Text("\(label) \(bytes.formattedBytes)").foregroundStyle(.secondary)
         }
-    }
-
-    private var explainer: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "info.circle.fill")
-                .foregroundStyle(.blue)
-            Text("macOS manages memory automatically — free-looking RAM is reused instantly and isn't wasted, and \"purging\" memory doesn't speed anything up (it can make things slower by forcing reloads). The one thing that genuinely helps is closing apps that are actively holding a lot of it, below.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding(12)
-        .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var topProcessesList: some View {
