@@ -19,8 +19,9 @@ project.
 - Everything routes through `FileManager.trashItem` (never permanent delete) and a
   `SafetyGuard` allowlist (only `$HOME` and `/Applications`, with `/System`, `/Library`,
   Keychains, Mail, Messages hard-blocked)
-- Verified against the real machine: found real, sizeable clutter (Orphaned App Files alone
-  was 65+ GB)
+- Verified against the real machine, fully scanned: **11.92 GB** reclaimable across all six
+  categories (Caches 4.19GB, Downloads 3.01GB, Documents 178.9MB, Unused Apps 1.7GB, Orphaned
+  1.18GB, Developer 2.27GB) — see Phase 4 for how the first pass at this number was wrong
 
 **Phase 2 — UX polish, "indie app" pass**
 - Overview dashboard: hero reclaimable-space number, color-coded breakdown bar, clickable
@@ -54,6 +55,49 @@ project.
   concretely explains the earlier "out of application memory" dialog (Chrome + helpers were
   the big holders)
 
+**Phase 4 — v1 hardening: real bugs found by actually running it**
+
+Building the feature is not the same as it being correct — every item below was caught by
+scanning/trashing on the real machine, not by reading the code:
+
+- **Sparse-file overstatement (the "65 GB" bug).** `SizeCalculator` originally summed logical
+  file size (`.fileSizeKey`). A Docker Desktop VM disk image left behind under
+  `~/Library/Containers/com.docker.docker` reported 64GB logically while occupying ~1GB on
+  disk (`du` agreed: 1.0G). This made Orphaned App Files show 66GB when the honest, `du`-
+  matching number is ~1.2GB. Fixed by switching to `.fileAllocatedSizeKey` (actual blocks) —
+  **not** `.totalFileAllocatedSizeKey`, which is the clone-aware "total including
+  clonefile-shared blocks" variant and does real I/O to detect APFS sharing; using it made a
+  single Caches scan take 30–40s instead of ~8s for a correction that doesn't matter when
+  you're summing independent files rather than asking if two share storage. `du` itself uses
+  the same plain block-count approach — this now matches it.
+- **False-positive orphans from helper bundle IDs.** `com.anthropic.claudefordesktop.ShipIt`
+  (Sparkle's updater helper) was flagged as orphaned even though `com.anthropic.claudefordesktop`
+  (Claude itself) is installed, because the match was exact-string only. Fixed: a candidate is
+  now excluded if it matches an installed bundle ID *or* is `<installed-id>.anything` (covers
+  `.ShipIt`, `.Sparkle`, and similar updater/helper sub-bundles).
+- **Full Disk Access gap, discovered by actually trying to trash a Container.** macOS silently
+  blocks any non-FDA app from writing to `~/Library/Containers/*` (other apps' sandbox
+  containers) even though the same app can freely read sizes and list contents there — Cocoa
+  surfaces this as `NSCocoaErrorDomain` 513. Before this fix, that failure just showed a bare
+  "couldn't be moved" message. Now `ScanStore` detects this specific error and the alert offers
+  an "Open Settings" button straight to Privacy & Security → Full Disk Access, with a plain-
+  language explanation of why. This means: **Orphaned App Files entries under Containers can't
+  actually be trashed until Eric grants Full Disk Access once** — everything else in the app
+  (Caches, Downloads, Documents, DerivedData, Applications) doesn't need it.
+- **Developer category was silently blind on this exact machine.** `xcrun simctl` (used to
+  find "unavailable" Simulator devices precisely) ships with full Xcode.app, not the Command
+  Line Tools — so on this CLT-only machine it fails outright, and Developer reported "nothing
+  found" while `~/Library/Developer/CoreSimulator/Devices` actually held 2.1GB. Added a
+  fallback: when `simctl` can't run (nil, not just empty), flag simulator device folders whose
+  mtime is 60+ days old by reading `device.plist` for a friendly name. Found two real
+  candidates on this machine (iPhone 15 Pro 1.48GB, iPhone 13 469.5MB, ~2 years untouched).
+- **`ls ~/.Trash` from Terminal lies.** Verifying a trashed item actually landed in Trash via
+  `ls -la ~/.Trash` intermittently returned "Operation not permitted" or a false-empty listing
+  — Terminal itself needs Full Disk Access to enumerate `.Trash` directly, unrelated to this
+  app. `osascript -e 'tell application "Finder" to get name of every item of trash'` is the
+  reliable way to check from the command line (Finder owns Trash and doesn't need FDA to
+  report on it). Worth remembering for any future debugging session, not just this one.
+
 ## How it's built
 
 - Swift Package Manager layout (`Package.swift`, `Sources/DiskCleaner/`), but **built via
@@ -69,18 +113,31 @@ project.
 
 ## Known limitations / caveats
 
-- **Menu bar icon unverified visually.** The `MenuBarExtra` code is standard SwiftUI and
-  `NSStatusItem` creation was confirmed to succeed (`isVisible: true`) via a direct AppKit
-  test, but nothing rendered in screenshots taken during testing in the sandboxed dev
-  environment used to build this (Dock and QuickLook thumbnailing showed similar gaps there
-  too — looks like an environment quirk, not app code). **Needs a real check on Eric's
-  actual Mac.**
+- **Menu bar icon still unverified visually**, re-checked in this session too — the
+  `MenuBarExtra` scene is standard SwiftUI, and the app runs and responds fine, but no icon
+  appears in the menu bar's right-side status area in screenshots from this dev/test
+  environment (checked again after a full rebuild — still absent). Given two independent
+  sessions have hit the same gap in what appears to be a sandboxed/virtualized test
+  environment rather than a real Mac, this is most likely still an environment quirk — but it
+  genuinely has not been confirmed working anywhere. **Needs a real check on Eric's actual
+  Mac** before relying on it; if it's also missing there, the menu bar feature needs its own
+  debugging pass.
+- **Full Disk Access required for one specific case**: trashing Orphaned App Files entries
+  that live under `~/Library/Containers/*` (other apps' sandbox containers). Everything else
+  works without it. The app now explains this and offers a direct link to the right System
+  Settings pane when it happens, rather than a bare error.
 - Orphaned App Files detection is a heuristic (matches bundle-ID-shaped folder names against
-  currently-installed apps) — always surfaced as "possibly orphaned," never auto-selected.
+  currently-installed apps, now also excluding `<installed-id>.helper-name` sub-bundles) —
+  always surfaced as "possibly orphaned," never auto-selected.
+- Developer category's stale-simulator detection falls back to a 60-day-unmodified heuristic
+  on machines without full Xcode (`simctl` unavailable) — less precise than the real
+  "unavailable" check Xcode.app would give (a simulator just idle for 2 months isn't
+  necessarily broken, just unused), but still an honest, clearly-labeled signal rather than
+  silently finding nothing.
 - Top Memory Users lists individual processes, not per-app aggregates — a multi-process app
   like Chrome shows several helper rows plus one quittable "Google Chrome" row, rather than
   one rolled-up number the way Activity Monitor's default view does. This is more literally
-  accurate but reads a little noisier; see Phase 4 ideas below if that's worth fixing.
+  accurate but reads a little noisier; see "Open considerations" below if that's worth fixing.
 - Ad-hoc signed only — fine for local use, would need a real Developer ID + notarization
   before sharing the built `.app` with anyone else.
 - Hardcoded thresholds (Downloads: 50MB/90 days, Documents: 100MB, unused apps: 6 months) —
@@ -119,3 +176,7 @@ Rough ideas, unordered, pull from these opportunistically:
   Store distribution was never a goal.
 - Build via `swiftc`/shell scripts, not Xcode project — keeps the whole thing scriptable and
   buildable from Claude Code without needing the Xcode GUI.
+- Size everything with `.fileAllocatedSizeKey`, never `.totalFileAllocatedSizeKey` — the
+  latter's clone-aware accounting is both unnecessary here and a real, measured 4-5x scan
+  slowdown. If a future accuracy complaint mentions clonefile/shared storage specifically,
+  reconsider deliberately; don't switch back by default.

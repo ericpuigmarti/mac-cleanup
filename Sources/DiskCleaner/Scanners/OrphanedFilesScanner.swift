@@ -41,7 +41,10 @@ enum OrphanedFilesScanner {
 
                 // Only treat reverse-DNS-shaped names as bundle-ID candidates.
                 guard lowerID.contains("."), !lowerID.hasPrefix("com.apple.") else { continue }
-                guard !knownIDs.contains(lowerID) else { continue }
+                // Exclude exact matches AND helper/updater sub-bundles of an installed app
+                // (e.g. "com.foo.app.ShipIt" or "com.foo.app.Sparkle" alongside "com.foo.app") —
+                // those aren't orphaned, they're just a subprocess with its own bundle ID.
+                guard !knownIDs.contains(where: { lowerID == $0 || lowerID.hasPrefix($0 + ".") }) else { continue }
                 // De-dupe: the same bundle ID often appears across multiple Library subfolders,
                 // but we key results by the actual entry path so each is individually selectable.
                 let key = entry.path

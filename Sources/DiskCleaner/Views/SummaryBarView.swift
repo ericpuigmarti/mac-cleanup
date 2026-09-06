@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct SummaryBarView: View {
     @ObservedObject var store: ScanStore
@@ -43,13 +44,30 @@ struct SummaryBarView: View {
         } message: {
             Text(confirmationMessage)
         }
-        .alert("Some items couldn't be moved", isPresented: Binding(
-            get: { store.lastTrashError != nil },
-            set: { if !$0 { store.lastTrashError = nil } }
-        )) {
-            Button("OK") { store.lastTrashError = nil }
+        .alert(
+            store.lastTrashNeedsFullDiskAccess ? "Disk Cleanup needs Full Disk Access" : "Some items couldn't be moved",
+            isPresented: Binding(
+                get: { store.lastTrashError != nil },
+                set: { if !$0 { store.lastTrashError = nil } }
+            )
+        ) {
+            if store.lastTrashNeedsFullDiskAccess {
+                Button("Open Settings") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+                        NSWorkspace.shared.open(url)
+                    }
+                    store.lastTrashError = nil
+                }
+                Button("Cancel", role: .cancel) { store.lastTrashError = nil }
+            } else {
+                Button("OK") { store.lastTrashError = nil }
+            }
         } message: {
-            Text(store.lastTrashError ?? "")
+            if store.lastTrashNeedsFullDiskAccess {
+                Text("macOS blocks apps without Full Disk Access from removing files under some Library folders (like other apps' Containers), even though Disk Cleanup can read and size them fine. Enable Disk Cleanup in Settings → Privacy & Security → Full Disk Access, then try again.\n\n\(store.lastTrashError ?? "")")
+            } else {
+                Text(store.lastTrashError ?? "")
+            }
         }
     }
 

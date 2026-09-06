@@ -8,6 +8,11 @@ final class ScanStore: ObservableObject {
     @Published var selectedItemIDs: Set<String> = []
     @Published var selection: SidebarSelection = .overview
     @Published var lastTrashError: String?
+    /// Set when a trash failure looks like macOS blocking us for lack of Full Disk
+    /// Access (e.g. items under ~/Library/Containers belonging to another app) —
+    /// lets the UI offer to open the right System Settings pane instead of just
+    /// showing an opaque error.
+    @Published var lastTrashNeedsFullDiskAccess = false
     /// Shared by the summary bar's button and the menu bar / Commands shortcuts,
     /// so every path to "trash the current selection" goes through one confirmation.
     @Published var showTrashConfirmation = false
@@ -103,6 +108,7 @@ final class ScanStore: ObservableObject {
         let itemsToTrash = selectedItems
         var succeeded: [String] = []
         var failures: [String] = []
+        var sawPermissionFailure = false
 
         for item in itemsToTrash {
             guard SafetyGuard.isSafe(item.url) else {
@@ -114,6 +120,9 @@ final class ScanStore: ObservableObject {
                 succeeded.append(item.id)
             } catch {
                 failures.append(item.name)
+                if Self.isLikelyFullDiskAccessFailure(error) {
+                    sawPermissionFailure = true
+                }
             }
         }
 
@@ -121,7 +130,24 @@ final class ScanStore: ObservableObject {
             results[category] = (results[category] ?? []).filter { !succeeded.contains($0.id) }
             selectedItemIDs.subtract(succeeded)
         }
+        lastTrashNeedsFullDiskAccess = sawPermissionFailure
         lastTrashError = failures.isEmpty ? nil : "Couldn't move to Trash: \(failures.joined(separator: ", "))"
+    }
+
+    /// macOS blocks writes to some ~/Library subfolders (notably other apps'
+    /// ~/Library/Containers) for any app that doesn't hold Full Disk Access,
+    /// even though the same app can freely read sizes and list contents there.
+    /// Cocoa surfaces this as NSCocoaErrorDomain 513 ("You don't have permission"),
+    /// often wrapping an underlying POSIX EPERM/EACCES.
+    private static func isLikelyFullDiskAccessFailure(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain, nsError.code == 513 { return true }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError,
+           underlying.domain == NSPOSIXErrorDomain,
+           underlying.code == Int(EPERM) || underlying.code == Int(EACCES) {
+            return true
+        }
+        return false
     }
 
     // MARK: - Memory
